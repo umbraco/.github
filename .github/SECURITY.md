@@ -8,5 +8,6 @@ Read more about [Umbraco's security policies](https://umbraco.com/trust-center/s
 
 You can expect to hear back from us within 48 hours.
 
-Feel free to sign up for the [Umbraco security advisories & notifications](https://umbraco.activehosted.com/f/33)
+## Security advisories
 
+You can sign up for [Umbraco security advisories & notifications](https://umbraco.activehosted.com/f/33)
