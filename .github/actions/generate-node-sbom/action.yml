@@ -1,0 +1,104 @@
+name: "Generate and upload SBOM for Node.js"
+description: "Creates a Node.js SBOM using CycloneDX and uploads it to Dependency-Track"
+
+inputs:
+  frontend_dir:
+    description: "Directory containing package.json"
+    required: true
+
+  project_name:
+    description: "Project name in Dependency-Track"
+    required: true
+
+  project_version:
+    description: "Project version"
+    required: true
+
+  api_key:
+    description: "Dependency-Track API key"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Define SBOM output file
+      shell: bash
+      run: |
+        echo "SBOM_FILE=sbom/bom-node.json" >> $GITHUB_ENV
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22.x'
+
+    - name: Install CycloneDX CLI
+      shell: bash
+      run: |
+        FRONTEND_DIR="${{ inputs.frontend_dir }}"
+        if [ -z "$FRONTEND_DIR" ] || [ "$FRONTEND_DIR" = "." ]; then
+          FRONTEND_DIR="."
+        fi
+
+        if [ ! -d "$FRONTEND_DIR" ]; then
+          echo "ERROR: frontend_dir '$FRONTEND_DIR' does not exist."
+          exit 1
+        fi
+
+        cd "$FRONTEND_DIR"
+
+        if [ ! -f "package.json" ]; then
+          echo "ERROR: $FRONTEND_DIR/package.json not found — cannot generate SBOM."
+          exit 1
+        fi
+
+        npm install --save-dev @cyclonedx/cyclonedx-npm
+
+    - name: Generate Node.js SBOM
+      shell: bash
+      run: |
+        mkdir -p sbom
+
+        FRONTEND_DIR="${{ inputs.frontend_dir }}"
+        if [ -z "$FRONTEND_DIR" ] || [ "$FRONTEND_DIR" = "." ]; then
+          FRONTEND_DIR="."
+        fi
+
+        cd "$FRONTEND_DIR"
+
+        if [ ! -f "package-lock.json" ] && [ ! -f "yarn.lock" ]; then
+          echo "ERROR: No lockfile found in $FRONTEND_DIR — cannot create SBOM."
+          exit 1
+        fi
+
+        # Generate JSON SBOM
+        npx @cyclonedx/cyclonedx-npm --json -o "../${SBOM_FILE}"
+
+        if [ ! -f "../${SBOM_FILE}" ]; then
+          echo "ERROR: SBOM file was not generated: ${SBOM_FILE}"
+          exit 1
+        fi
+
+    - name: Upload SBOM artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: node-sbom
+        path: ${{ env.SBOM_FILE }}
+
+    - name: Upload SBOM to Dependency-Track
+      shell: bash
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        PROJECT_NAME: ${{ inputs.project_name }}
+        PROJECT_VERSION: ${{ inputs.project_version }}
+        TRACK_ENDPOINT: "https://ca-live-global-dtrack-api.purplemoss-6e7d841c.westeurope.azurecontainerapps.io/api/v1/bom"
+      run: |
+        curl --fail-with-body -v -i -w "\nHTTP Status: %{http_code}\n" \
+          -X POST "$TRACK_ENDPOINT" \
+          -H "X-Api-Key: $API_KEY" \
+          -H "accept: application/json" \
+          -H "Content-Type: multipart/form-data" \
+          -F "autoCreate=true" \
+          -F "projectName=$PROJECT_NAME" \
+          -F "projectVersion=$PROJECT_VERSION" \
+          -F "bom=@${SBOM_FILE}"
