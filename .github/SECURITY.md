@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-Please report any vulnerabilities to security@umbraco.dk
+Please report any vulnerabilities to security@umbraco.com
 
 Read more about [Umbraco's security policies](https://umbraco.com/trust-center/security-and-umbraco/how-to-report-a-vulnerability-in-umbraco/).
 
