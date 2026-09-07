@@ -1,0 +1,115 @@
+name: "Generate and upload SBOM"
+description: "Creates a CycloneDX SBOM (NuGet, npm, or Terraform) using Umbraco.Internal.Sbom and uploads it to Dependency-Track"
+
+inputs:
+  project_path:
+    description: "Path to a .csproj/.sln/.slnx, a directory containing package.json + package-lock.json, or a Terraform directory. Any ecosystem-specific setup (npm ci, dotnet restore, terraform init) must already have run before this action is called."
+    required: true
+
+  project_name:
+    description: "Project name in Dependency-Track"
+    required: true
+
+  project_version:
+    description: "Project version"
+    required: true
+
+  output_file:
+    description: "Where to write the SBOM XML, relative to the workspace root"
+    required: false
+    default: "sbom/bom.xml"
+
+  api_key:
+    description: "Dependency-Track API key. Leave empty to generate the SBOM without uploading (e.g. before the secret is configured)."
+    required: false
+    default: ""
+
+  allow_commercial:
+    description: "Permit commercial-category licenses (e.g. Six Labors Split License)"
+    required: false
+    default: "false"
+
+  allow_copyleft:
+    description: "Permit copyleft-category licenses (GPL, LGPL, AGPL, EPL, ...)"
+    required: false
+    default: "false"
+
+  allow_packages:
+    description: "Newline-separated per-package exceptions, e.g. 'nuget:SixLabors.ImageSharp'. Repeatable."
+    required: false
+    default: ""
+
+  policy_allow_file:
+    description: "Path to a .sbom-policy.json file, relative to the workspace root"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Install Umbraco.Internal.Sbom
+      shell: bash
+      run: dotnet tool install -g Umbraco.Internal.Sbom
+
+    - name: Generate SBOM
+      shell: bash
+      run: |
+        mkdir -p "$(dirname "${{ inputs.output_file }}")"
+
+        ARGS=("${{ inputs.project_path }}" --output-file "${{ inputs.output_file }}")
+
+        if [ "${{ inputs.allow_commercial }}" = "true" ]; then
+          ARGS+=(--allow-commercial)
+        fi
+        if [ "${{ inputs.allow_copyleft }}" = "true" ]; then
+          ARGS+=(--allow-copyleft)
+        fi
+        if [ -n "${{ inputs.policy_allow_file }}" ]; then
+          ARGS+=(--policy-allow-file "${{ inputs.policy_allow_file }}")
+        fi
+        while IFS= read -r pkg; do
+          [ -n "$pkg" ] && ARGS+=(--allow-package "$pkg")
+        done <<< "${{ inputs.allow_packages }}"
+
+        umbraco-sbom "${ARGS[@]}"
+
+        if [ ! -f "${{ inputs.output_file }}" ]; then
+          echo "ERROR: SBOM file was not generated: ${{ inputs.output_file }}"
+          exit 1
+        fi
+
+    - name: Upload SBOM artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sbom-${{ inputs.project_name }}
+        path: ${{ inputs.output_file }}
+
+    - name: Upload SBOM to Dependency-Track
+      shell: bash
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        PROJECT_NAME: ${{ inputs.project_name }}
+        PROJECT_VERSION: ${{ inputs.project_version }}
+        OUTPUT_FILE: ${{ inputs.output_file }}
+        TRACK_ENDPOINT: "https://ca-live-global-dtrack-api.purplemoss-6e7d841c.westeurope.azurecontainerapps.io/api/v1/bom"
+      run: |
+        if [ -z "$API_KEY" ]; then
+          echo "::warning::DTRACK_API_KEY is not configured for this repo — skipping Dependency-Track upload. The SBOM is still available as a workflow artifact."
+          exit 0
+        fi
+
+        curl --fail-with-body -v -i -w "\nHTTP Status: %{http_code}\n" \
+          -X POST "$TRACK_ENDPOINT" \
+          -H "X-Api-Key: $API_KEY" \
+          -H "accept: application/json" \
+          -H "Content-Type: multipart/form-data" \
+          -F "autoCreate=true" \
+          -F "projectName=$PROJECT_NAME" \
+          -F "projectVersion=$PROJECT_VERSION" \
+          -F "bom=@${OUTPUT_FILE}"
