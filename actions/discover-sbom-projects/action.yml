@@ -1,0 +1,69 @@
+name: "Discover uncovered SBOM projects"
+description: "Finds npm and standalone NuGet projects not already covered by a repo's named SBOM jobs, for use as a safety-net matrix that catches future additions automatically."
+
+inputs:
+  main_solution:
+    description: "Path to a .sln/.slnx file. Any .csproj it references is excluded from NuGet discovery. Omit if there's no main solution (or you want every .csproj discovered)."
+    required: false
+    default: ""
+  known_npm_dirs:
+    description: "Newline-separated npm project directories already scanned by named jobs elsewhere in the workflow - excluded here to avoid double-scanning."
+    required: false
+    default: ""
+  known_nuget_paths:
+    description: "Newline-separated standalone .csproj paths already scanned by named jobs elsewhere in the workflow - excluded here to avoid double-scanning."
+    required: false
+    default: ""
+
+outputs:
+  projects:
+    description: "JSON array of {dir, slug, type} for every discovered, not-already-covered project. type is 'npm' or 'nuget'."
+    value: ${{ steps.find.outputs.projects }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: find
+      shell: bash
+      run: |
+        projects="[]"
+
+        # --- npm: any package-lock.json not already a known dir ---
+        while IFS= read -r lockfile; do
+          dir=$(dirname "$lockfile")
+          norm_dir="${dir#./}"
+          known=false
+          while IFS= read -r k; do
+            [ -z "$k" ] && continue
+            [ "$norm_dir" = "${k#./}" ] && known=true && break
+          done <<< "${{ inputs.known_npm_dirs }}"
+          [ "$known" = true ] && continue
+          slug=$(echo "$norm_dir" | sed 's#/#-#g')
+          projects=$(echo "$projects" | jq --arg dir "$dir" --arg slug "$slug" \
+            '. + [{"dir": $dir, "slug": $slug, "type": "npm"}]')
+        done < <(find . -name package-lock.json -not -path '*/node_modules/*')
+
+        # --- nuget: any .csproj not in main_solution and not already known ---
+        if [ -n "${{ inputs.main_solution }}" ] && [ -f "${{ inputs.main_solution }}" ]; then
+          grep -oE '"[^"]+\.csproj"' "${{ inputs.main_solution }}" | tr -d '"' | tr '\\' '/' > /tmp/sln-projects.txt
+        else
+          : > /tmp/sln-projects.txt
+        fi
+
+        while IFS= read -r csproj; do
+          rel="${csproj#./}"
+          grep -qxF "$rel" /tmp/sln-projects.txt && continue
+          known=false
+          while IFS= read -r k; do
+            [ -z "$k" ] && continue
+            [ "$rel" = "${k#./}" ] && known=true && break
+          done <<< "${{ inputs.known_nuget_paths }}"
+          [ "$known" = true ] && continue
+          slug=$(echo "$rel" | sed 's#\.csproj$##; s#/#-#g')
+          projects=$(echo "$projects" | jq --arg dir "$rel" --arg slug "$slug" \
+            '. + [{"dir": $dir, "slug": $slug, "type": "nuget"}]')
+        done < <(find . -name '*.csproj' -not -path '*/bin/*' -not -path '*/obj/*')
+
+        projects=$(echo "$projects" | jq -c .)
+        echo "Discovered uncovered projects: $projects"
+        echo "projects=$projects" >> "$GITHUB_OUTPUT"
