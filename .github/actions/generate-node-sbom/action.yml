@@ -1,5 +1,5 @@
 name: "Generate and upload SBOM for Node.js"
-description: "Creates a Node.js SBOM using CycloneDX and uploads it to Dependency-Track"
+description: "Creates a Node.js SBOM using Umbraco.Internal.Sbom and uploads it to Dependency-Track"
 
 inputs:
   frontend_dir:
@@ -15,8 +15,29 @@ inputs:
     required: true
 
   api_key:
-    description: "Dependency-Track API key"
-    required: true
+    description: "Dependency-Track API key. Leave empty to generate the SBOM without uploading (e.g. before the secret is configured)."
+    required: false
+    default: ""
+
+  allow_commercial:
+    description: "Permit commercial-category licenses (e.g. Six Labors Split License)"
+    required: false
+    default: "false"
+
+  allow_copyleft:
+    description: "Permit copyleft-category licenses (GPL, LGPL, AGPL, EPL, ...)"
+    required: false
+    default: "false"
+
+  allow_packages:
+    description: "Newline-separated per-package exceptions, e.g. 'npm:some-package'. Repeatable."
+    required: false
+    default: ""
+
+  policy_allow_file:
+    description: "Path to a .sbom-policy.json file, relative to frontend_dir"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -25,14 +46,19 @@ runs:
     - name: Define SBOM output file
       shell: bash
       run: |
-        echo "SBOM_FILE=sbom/bom-node.json" >> $GITHUB_ENV
+        echo "SBOM_FILE=sbom/bom-node.xml" >> $GITHUB_ENV
 
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '22.x'
 
-    - name: Install CycloneDX CLI
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Install project dependencies
       shell: bash
       run: |
         FRONTEND_DIR="${{ inputs.frontend_dir }}"
@@ -52,7 +78,16 @@ runs:
           exit 1
         fi
 
-        npm install --save-dev @cyclonedx/cyclonedx-npm
+        if [ ! -f "package-lock.json" ]; then
+          echo "ERROR: No package-lock.json found in $FRONTEND_DIR. umbraco-sbom reads npm lockfiles only (lockfileVersion 2 or 3) — yarn.lock and pnpm-lock.yaml are not supported."
+          exit 1
+        fi
+
+        npm ci --no-audit --no-fund
+
+    - name: Install Umbraco.Internal.Sbom
+      shell: bash
+      run: dotnet tool install -g Umbraco.Internal.Sbom
 
     - name: Generate Node.js SBOM
       shell: bash
@@ -64,17 +99,24 @@ runs:
           FRONTEND_DIR="."
         fi
 
-        cd "$FRONTEND_DIR"
+        ARGS=("$FRONTEND_DIR" --output-file "${SBOM_FILE}")
 
-        if [ ! -f "package-lock.json" ] && [ ! -f "yarn.lock" ]; then
-          echo "ERROR: No lockfile found in $FRONTEND_DIR — cannot create SBOM."
-          exit 1
+        if [ "${{ inputs.allow_commercial }}" = "true" ]; then
+          ARGS+=(--allow-commercial)
         fi
+        if [ "${{ inputs.allow_copyleft }}" = "true" ]; then
+          ARGS+=(--allow-copyleft)
+        fi
+        if [ -n "${{ inputs.policy_allow_file }}" ]; then
+          ARGS+=(--policy-allow-file "$FRONTEND_DIR/${{ inputs.policy_allow_file }}")
+        fi
+        while IFS= read -r pkg; do
+          [ -n "$pkg" ] && ARGS+=(--allow-package "$pkg")
+        done <<< "${{ inputs.allow_packages }}"
 
-        # Generate JSON SBOM
-        npx @cyclonedx/cyclonedx-npm --json -o "../${SBOM_FILE}"
+        umbraco-sbom "${ARGS[@]}"
 
-        if [ ! -f "../${SBOM_FILE}" ]; then
+        if [ ! -f "${SBOM_FILE}" ]; then
           echo "ERROR: SBOM file was not generated: ${SBOM_FILE}"
           exit 1
         fi
@@ -82,7 +124,7 @@ runs:
     - name: Upload SBOM artifact
       uses: actions/upload-artifact@v4
       with:
-        name: node-sbom
+        name: node-sbom-${{ inputs.project_name }}
         path: ${{ env.SBOM_FILE }}
 
     - name: Upload SBOM to Dependency-Track
@@ -93,6 +135,11 @@ runs:
         PROJECT_VERSION: ${{ inputs.project_version }}
         TRACK_ENDPOINT: "https://ca-live-global-dtrack-api.purplemoss-6e7d841c.westeurope.azurecontainerapps.io/api/v1/bom"
       run: |
+        if [ -z "$API_KEY" ]; then
+          echo "::warning::DTRACK_API_KEY is not configured for this repo — skipping Dependency-Track upload. The SBOM is still available as a workflow artifact."
+          exit 0
+        fi
+
         curl --fail-with-body -v -i -w "\nHTTP Status: %{http_code}\n" \
           -X POST "$TRACK_ENDPOINT" \
           -H "X-Api-Key: $API_KEY" \
