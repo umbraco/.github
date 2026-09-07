@@ -77,7 +77,22 @@ runs:
           [ -n "$pkg" ] && ARGS+=(--allow-package "$pkg")
         done <<< "${{ inputs.allow_packages }}"
 
+        set +e
         umbraco-sbom "${ARGS[@]}"
+        EXIT_CODE=$?
+        set -e
+
+        # Exit codes per the tool's own contract (not our invention):
+        #   0  success
+        #   10 success-with-warnings - some components have a genuinely
+        #      unresolved license; the SBOM is still written and usable.
+        #   everything else is a real failure (schema/policy/no-manifest/etc).
+        if [ "$EXIT_CODE" -eq 10 ]; then
+          echo "::warning::umbraco-sbom finished with unresolved-license warnings (exit 10) for ${{ inputs.project_name }}. The SBOM was still generated - check this step's output above for which component(s) are unresolved."
+        elif [ "$EXIT_CODE" -ne 0 ]; then
+          echo "ERROR: umbraco-sbom failed with exit code $EXIT_CODE"
+          exit "$EXIT_CODE"
+        fi
 
         if [ ! -f "${{ inputs.output_file }}" ]; then
           echo "ERROR: SBOM file was not generated: ${{ inputs.output_file }}"
